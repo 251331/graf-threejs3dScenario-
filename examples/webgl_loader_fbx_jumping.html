@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>three.js webgl - FBX loader</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <link type="text/css" rel="stylesheet" href="main.css">
+</head>
+
+<body>
+<div id="info">
+    <a href="https://threejs.org" target="_blank" rel="noopener">three.js</a> - FBXLoader<br />
+    Character and animation from <a href="https://www.mixamo.com/" target="_blank" rel="noopener">Mixamo</a>
+</div>
+
+<script type="importmap">
+{
+    "imports": {
+        "three": "../build/three.module.js",
+        "three/addons/": "./jsm/"
+    }
+}
+</script>
+
+<script type="module">
+
+import * as THREE from 'three';
+import Stats from 'three/addons/libs/stats.module.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+import { Audio, AudioListener, AudioLoader } from 'three';
+
+const manager = new THREE.LoadingManager();
+
+let camera, scene, renderer, stats, object, loader, guiMorphsFolder;
+let mixer;
+const clock = new THREE.Clock();
+
+const params = { asset: 'Jumping Down' };
+const assets = ['Jumping Down', 'morph_test'];
+
+init();
+
+function init() {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 2000);
+    camera.position.set(100, 200, 300);
+
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xdedede);
+    
+    // Luz ambiental
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    scene.add(ambientLight);
+
+    // Luz direccional
+    const dirLight = new THREE.DirectionalLight(0xffffff, 5);
+    dirLight.position.set(10, 100, 200);
+    dirLight.castShadow = true;
+    dirLight.shadow.camera.top = 180;
+    dirLight.shadow.camera.bottom = -100;
+    dirLight.shadow.camera.left = -120;
+    dirLight.shadow.camera.right = 120;
+    scene.add(dirLight);
+
+    // ----------------------------------------------------------
+    // HDR
+    const rgbeLoader = new RGBELoader();
+    rgbeLoader.load('models/rgbe/horn-koppe_spring_4k.hdr', function (texture) {
+        texture.mapping = THREE.EquirectangularReflectionMapping;
+        texture.encoding = THREE.sRGBEncoding;
+        scene.background = texture;
+        scene.environment = texture;
+
+        createGround();
+    });
+
+    // Renderer
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setAnimationLoop(animate);
+    renderer.shadowMap.enabled = true;
+    container.appendChild(renderer.domElement);
+
+    // Controles
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 100, 0);
+    controls.update();
+
+    window.addEventListener('resize', onWindowResize);
+
+    // Stats
+    stats = new Stats();
+    container.appendChild(stats.dom);
+
+    // GUI
+    const gui = new GUI();
+    gui.add(params, 'asset', assets).onChange(value => loadAsset(value));
+    guiMorphsFolder = gui.addFolder('Morphs').hide();
+
+    loader = new FBXLoader(manager);
+    loadAsset(params.asset);
+
+    // Audio
+    const listener = new AudioListener();
+    camera.add(listener);
+    listener.context.resume();
+    const sound = new Audio(listener);
+    const audioLoader = new AudioLoader();
+    audioLoader.load('models/rgbe/naturaleza-282177.mp3', function (buffer) {
+        sound.setBuffer(buffer);
+        sound.setLoop(true);
+        sound.setVolume(0.5);
+        window.addEventListener('click', () => {
+            if (!sound.isPlaying) sound.play();
+        });
+    });
+
+    // Bruma
+    scene.fog = new THREE.Fog(0xdedede, 100, 1000);
+}
+
+// ----------------------------------------------------------
+// Suelo
+function createGround() {
+    const textureLoader = new THREE.TextureLoader();
+    const diffuse = textureLoader.load('models/rgbe/rustic_stone_wall_02_diff_4k.jpg');
+    const normalMap = textureLoader.load('models/rgbe/rustic_stone_wall_02_nor_4k.png');
+    const roughnessMap = textureLoader.load('models/rgbe/rustic_stone_wall_02_rough_4k.png');
+
+    [diffuse, normalMap, roughnessMap].forEach(tex => {
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(20, 20);
+        tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    });
+    diffuse.encoding = THREE.sRGBEncoding;
+
+    const groundMaterial = new THREE.MeshStandardMaterial({
+        map: diffuse,
+        normalMap: normalMap,
+        roughnessMap: roughnessMap,
+        roughness: 0.8,
+        metalness: 0.1
+    });
+
+    const groundGeometry = new THREE.PlaneGeometry(4000, 4000);
+    const mesh = new THREE.Mesh(groundGeometry, groundMaterial);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+}
+
+// ----------------------------------------------------------
+// Cargar FBX y aplicar textura personalizada
+function loadAsset(asset) {
+    loader.load('models/fbx/' + asset + '.fbx', function (group) {
+        if (object) {
+            object.traverse(child => {
+                if (child.material) {
+                    const materials = Array.isArray(child.material) ? child.material : [child.material];
+                    materials.forEach(mat => {
+                        if (mat.map) mat.map.dispose();
+                        mat.dispose();
+                    });
+                }
+                if (child.geometry) child.geometry.dispose();
+            });
+            scene.remove(object);
+        }
+
+        object = group;
+        mixer = object.animations && object.animations.length ? new THREE.AnimationMixer(object) : null;
+
+        if (mixer) {
+            const action = mixer.clipAction(object.animations[0]);
+            action.play();
+        }
+
+        guiMorphsFolder.children.forEach(child => child.destroy());
+        guiMorphsFolder.hide();
+
+        // Cargar textura personalizada para el modelo
+        const textureLoader = new THREE.TextureLoader();
+        const customTexture = textureLoader.load('models/rgbe/wood_table_worn_diff_4k.jpg');
+        customTexture.encoding = THREE.sRGBEncoding;
+
+        object.traverse(child => {
+            if (child.isMesh) {
+                child.castShadow = true;
+                child.receiveShadow = true;
+
+                // Asignar material con textura personalizada
+                child.material = new THREE.MeshStandardMaterial({
+                    map: customTexture,
+                    metalness: 0.5,
+                    roughness: 0.3
+                });
+
+                if (child.morphTargetDictionary) {
+                    guiMorphsFolder.show();
+                    const meshFolder = guiMorphsFolder.addFolder(child.name || child.uuid);
+                    Object.keys(child.morphTargetDictionary).forEach(key => {
+                        meshFolder.add(child.morphTargetInfluences, child.morphTargetDictionary[key], 0, 1, 0.01);
+                    });
+                }
+            }
+        });
+
+        scene.add(object);
+    });
+}
+
+function onWindowResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+function animate() {
+    const delta = clock.getDelta();
+    if (mixer) mixer.update(delta);
+    renderer.render(scene, camera);
+    stats.update();
+}
+
+</script>
+</body>
+</html>
